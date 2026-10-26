@@ -31,3 +31,8 @@ batch_logs/
 
 # Data
 bids/
+# Personal run scripts / editor settings
+.vscode/
+script_4mmRS.sh
+script_SCATTR-seeg.sh
+script_SCATTR-seeg_nohull.sh
