@@ -70,9 +70,6 @@ processing and visualisation. NeuroImage, 2019, 202, 116137
 
 
 include: "mrtpipelines/preproc.smk"
-include: "mrtpipelines/tractography.smk"
-include: "mrtpipelines/filter_tck.smk"
-
 
 rule dwi2tensor:
     input:
@@ -103,3 +100,10 @@ rule dwi2tensor:
         -fa {output.fa} -ad {output.ad} -rd {output.rd} \\
         -adc {output.md} >> {log} 2>&1
         """
+
+include: "mrtpipelines/act.smk"
+include: "mrtpipelines/tractography.smk"
+include: "mrtpipelines/filter_tck.smk"
+include: "mrtpipelines/passthrough.smk"
+
+

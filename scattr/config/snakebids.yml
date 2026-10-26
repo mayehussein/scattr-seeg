@@ -188,9 +188,9 @@ parse_args:
 
   --bzero_thresh:
     help: "Set the threshold for a shell to be considered b=0. By default, this
-      value is set to 10"
+      value is set to 11"
     nargs: "?"
-    default: 10
+    default: 11
 
   --shells:
     help: "(Mrtrix3) specify one or more b-values to use during processing, as
@@ -245,6 +245,50 @@ parse_args:
       node is found within this radius, the streamline endpoint is not
       assigned to any node. (default: 1.5mm)"
     default: 1.5
+
+  --hull_margin_mm:
+    help: "(Mrtrix3) margin in mm added around the convex hull for the local
+      tckgen run. Streamlines that go further than this outside the hull are
+      rejected (-exclude); streamlines within the margin are kept intact.
+      Set to 0 to use the exact hull as in the original SCATTR.
+      (default: 5mm)"
+    default: 5
+
+  --skip_exclude_filter:
+    help: "Skip the per-edge exclusion filtering (streamlines passing through
+      a third node are removed). The connectome is then built directly from
+      the SIFT2-weighted tractogram (desc-subcortical outputs), and FA/MD
+      connectomes use the same tractogram."
+    action: store_true
+    default: False
+
+  --act:
+    help: "(Mrtrix3) Use anatomically-constrained tractography. A 5-tissue-type
+      image is generated from the Freesurfer subject directory (5ttgen hsvs)
+      and used by both tckgen runs (-act -backtrack -crop_at_gmwmi
+      -maxlength 250) and by tcksift2. The whole-brain run is seeded with
+      -seed_dynamic. A per-node tissue table is also written."
+    action: store_true
+    default: False
+
+  --passthrough_connectome:
+    help: "Also build a connectome in which a streamline is linked to a node if
+      one of its endpoints is assigned to the node (radial search) OR it
+      passes through the node. Useful for nodes in white matter, which
+      streamlines traverse but rarely end in (desc-traversal outputs). A
+      streamline linked to several nodes contributes to every pair."
+    action: store_true
+    default: False
+
+  --skip_convex_hull:
+    help: "Do not use the convex hull for the local tckgen run: seeds are
+      placed uniformly within the brain mask and only streamlines that
+      traverse a node are kept (-include), with no hull exclusion. The local
+      run is then a whole-brain tractogram restricted to streamlines touching
+      the nodes; it rejects more streamlines and takes longer.
+      --hull_margin_mm is ignored."
+    action: store_true
+    default: False
 #-----------------------------------------------------#
 
 # Workflow specific config

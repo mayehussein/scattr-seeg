@@ -239,27 +239,71 @@ rule filtered_tck2connectome:
         """
 
 
-rule connectome2tck_exemplars:
-    """
-    Extract one representative (exemplar) streamline per connection edge
-    from the filtered tractogram. The exemplar is the streamline closest
-    to the mean of all streamlines in that edge, making it ideal for
-    lightweight visualization of connectivity patterns.
+# Tractogram used for the FA/MD connectomes: the exclusion-filtered
+# tractogram, or with --skip_exclude_filter the full SIFT2-weighted one
+skip_exclude_filter = config.get("skip_exclude_filter", False)
+metrics_desc = "subcortical" if skip_exclude_filter else "filteredsubcortical"
+metrics_tck = (
+    rules.tckedit_combine.output.tck
+    if skip_exclude_filter
+    else rules.filter_combine_tck.output.combined_tck
+)
+metrics_weights = (
+    rules.tcksift2.output.weights
+    if skip_exclude_filter
+    else rules.filter_combine_tck.output.combined_weights
+)
 
-    Smith, R. E.; Tournier, J.-D.; Calamante, F. & Connelly, A.
-    The effects of SIFT on the reproducibility and biological accuracy
-    of the structural connectome. NeuroImage, 2015, 104, 253-265
-    """
+
+rule tcksample_metrics:
+    """Sample diffusion metrics (FA, MD) along streamlines of metrics_tck."""
     input:
-        tck=rules.filter_combine_tck.output.combined_tck,
-        sl_assignment=rules.filtered_tck2connectome.output.sl_assignment,
-        num_labels=rules.get_num_nodes.output.num_labels,
+        tck=metrics_tck,
+        fa=rules.dwi2tensor.output.fa,
+        md=rules.dwi2tensor.output.md,
     output:
-        exemplars_tck=bids_tractography_out(
-            desc="filteredsubcorticalExemplars",
-            suffix="tractography.tck",
+        fa_samples=bids_tractography_out(
+            desc=metrics_desc,
+            suffix="faSampled.txt",
         ),
-    threads: 8
+        md_samples=bids_tractography_out(
+            desc=metrics_desc,
+            suffix="mdSampled.txt",
+        ),
+    threads: 4
+    resources:
+        mem_mb=32000,
+        time=60 * 4,
+    log:
+        bids_log(suffix="tcksample_metrics.log"),
+    group:
+        "tractography_update"
+    container:
+        config["singularity"]["scattr"]
+    shell:
+        """tcksample -nthreads {threads} -stat_tck mean \\
+        {input.tck} {input.fa} {output.fa_samples} &> {log}
+
+        tcksample -nthreads {threads} -stat_tck mean \\
+        {input.tck} {input.md} {output.md_samples} >> {log} 2>&1
+        """
+
+
+rule filtered_tck2connectome_fa:
+    """Build FA-weighted connectome: SIFT2-weighted mean FA per edge."""
+    input:
+        weights=metrics_weights,
+        tck=metrics_tck,
+        subcortical_seg=rules.tckgen_wholebrain.input.subcortical_seg,
+        fa_samples=rules.tcksample_metrics.output.fa_samples,
+    params:
+        radius=config["radial_search"],
+    output:
+        fa_weights=bids_tractography_out(
+            desc=metrics_desc,
+            suffix="faWeights.csv",
+        ),
+    threads: 32
     resources:
         tmp_dir=lambda wildcards: bids_tractography_out(
             root=os.environ.get("SLURM_TMPDIR")
@@ -267,35 +311,85 @@ rule connectome2tck_exemplars:
             else "/tmp",
             **wildcards,
         ),
-        tmp_exemplars=lambda wildcards: bids_tractography_out(
+        tmp_fa_weights=lambda wildcards: bids_tractography_out(
             root=os.environ.get("SLURM_TMPDIR")
             if config.get("slurm_tmpdir")
             else "/tmp",
-            desc="filteredsubcorticalExemplars",
-            suffix="tractography.tck",
+            desc=metrics_desc,
+            suffix="faWeights.csv",
             **wildcards,
         ),
-        mem_mb=32000,
-        time=60,
+        mem_mb=128000,
+        time=60 * 3,
     log:
-        bids_log(suffix="connectome2tckExemplars.log"),
+        bids_log(desc="filtered", suffix="tck2connectome_fa"),
     group:
         "tractography_update"
     container:
         config["singularity"]["scattr"]
     shell:
+        """mkdir -p {resources.tmp_dir}
+
+        tck2connectome -nthreads {threads} -zero_diagonal -stat_edge mean \\
+        -assignment_radial_search {params.radius} \\
+        -scale_file {input.fa_samples} \\
+        -tck_weights_in {input.weights} \\
+        -symmetric {input.tck} {input.subcortical_seg} \\
+        {resources.tmp_fa_weights} &> {log}
+
+        rsync {resources.tmp_fa_weights} \\
+        {output.fa_weights} >> {log} 2>&1
         """
-        mkdir -p {resources.tmp_dir}
 
-        num_labels=$(cat {input.num_labels})
 
-        connectome2tck -nthreads {threads} \
-        -nodes `seq -s, 1 $((num_labels))` \
-        -exclusive -files single \
-        -exemplars {resources.tmp_dir}/exemplar_coords.mif \
-        {input.tck} {input.sl_assignment} \
-        {resources.tmp_exemplars} &> {log}
+rule filtered_tck2connectome_md:
+    """Build MD-weighted connectome: SIFT2-weighted mean MD per edge."""
+    input:
+        weights=metrics_weights,
+        tck=metrics_tck,
+        subcortical_seg=rules.tckgen_wholebrain.input.subcortical_seg,
+        md_samples=rules.tcksample_metrics.output.md_samples,
+    params:
+        radius=config["radial_search"],
+    output:
+        md_weights=bids_tractography_out(
+            desc=metrics_desc,
+            suffix="mdWeights.csv",
+        ),
+    threads: 32
+    resources:
+        tmp_dir=lambda wildcards: bids_tractography_out(
+            root=os.environ.get("SLURM_TMPDIR")
+            if config.get("slurm_tmpdir")
+            else "/tmp",
+            **wildcards,
+        ),
+        tmp_md_weights=lambda wildcards: bids_tractography_out(
+            root=os.environ.get("SLURM_TMPDIR")
+            if config.get("slurm_tmpdir")
+            else "/tmp",
+            desc=metrics_desc,
+            suffix="mdWeights.csv",
+            **wildcards,
+        ),
+        mem_mb=128000,
+        time=60 * 3,
+    log:
+        bids_log(desc="filtered", suffix="tck2connectome_md"),
+    group:
+        "tractography_update"
+    container:
+        config["singularity"]["scattr"]
+    shell:
+        """mkdir -p {resources.tmp_dir}
 
-        rsync -v {resources.tmp_exemplars} \
-        {output.exemplars_tck} >> {log} 2>&1
+        tck2connectome -nthreads {threads} -zero_diagonal -stat_edge mean \\
+        -assignment_radial_search {params.radius} \\
+        -scale_file {input.md_samples} \\
+        -tck_weights_in {input.weights} \\
+        -symmetric {input.tck} {input.subcortical_seg} \\
+        {resources.tmp_md_weights} &> {log}
+
+        rsync {resources.tmp_md_weights} \\
+        {output.md_weights} >> {log} 2>&1
         """

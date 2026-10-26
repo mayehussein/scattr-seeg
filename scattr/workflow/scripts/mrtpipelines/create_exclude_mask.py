@@ -17,6 +17,7 @@ def create_exclude_mask(
     out_dir,
     wildcards,
     threads,
+    skip_labelmerge=False,
 ):
     # Create output directory
     Path(out_dir).mkdir(parents=True, exist_ok=True)
@@ -27,23 +28,29 @@ def create_exclude_mask(
 
     node_pairs = np.triu_indices(num_labels, k=1)
 
-    # Zona labels (currently misisng subjects)
-    lZI = expand(  # (used in shell call)   # noqa: N806
-        bids(
+    # Zona incerta labels — only relevant when using the ZonaBB atlas
+    # (labelmerge). When using SEEG contacts (skip_labelmerge=True),
+    # labels 21/22 are regular contacts, not zona incerta, and should
+    # NOT be subtracted from the exclusion mask.
+    zi_subtraction = ""
+    if not skip_labelmerge:
+        lZI = expand(  # noqa: N806
+            bids(
+                root=base_dir,
+                datatype="roi_masks",
+                desc="21",
+                suffix="mask.mif",
+                **wildcards,
+            )
+        )
+        rZI = bids(  # noqa: N806
             root=base_dir,
             datatype="roi_masks",
-            desc="21",
+            desc="22",
             suffix="mask.mif",
             **wildcards,
         )
-    )
-    rZI = bids(  # (used in shell call) # noqa: N806
-        root=base_dir,
-        datatype="roi_masks",
-        desc="22",
-        suffix="mask.mif",
-        **wildcards,
-    )
+        zi_subtraction = f"{lZI} -sub {rZI} -sub"
 
     # Create mask sequentially
     out_mask = expand(
@@ -63,18 +70,18 @@ def create_exclude_mask(
     # Create masks - run sequentially due to parallelization errors
     for idx, mask in enumerate(out_mask):
         in_roi1, in_roi2 = roi1[idx], roi2[idx]  # (used in shell)
-        shell(
-            "mrcalc -nthreads {threads} "
-            "{subcortical_seg} 0 -neq {in_roi1} -sub {in_roi2} -sub {lZI} "
-            "-sub {rZI} -sub {mask} -force"
-        )
-
-    # Create masks - parallelizes within a single jobs
-    # shell(
-    #     "singularity run {container} parallel --jobs {threads} -k "
-    #     "mrcalc {subcortical_seg} 0 -neq {{1}} -sub {{2}} -sub {lZI} "
-    #     "-sub {rZI} -sub {{3}} ::: {roi1} :::+ {roi2} :::+ {out_mask}"
-    # )
+        if zi_subtraction:
+            shell(
+                "mrcalc -nthreads {threads} "
+                "{subcortical_seg} 0 -neq {in_roi1} -sub {in_roi2} -sub "
+                "{zi_subtraction} {mask} -force"
+            )
+        else:
+            shell(
+                "mrcalc -nthreads {threads} "
+                "{subcortical_seg} 0 -neq {in_roi1} -sub {in_roi2} -sub "
+                "{mask} -force"
+            )
 
 
 if __name__ == "__main__":
@@ -88,4 +95,6 @@ if __name__ == "__main__":
         out_dir=snakemake.output.out_dir,
         wildcards=snakemake.wildcards,
         threads=snakemake.threads,
+        skip_labelmerge=snakemake.params.get("skip_labelmerge", False),
     )
+

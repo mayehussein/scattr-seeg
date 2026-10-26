@@ -321,10 +321,17 @@ rule create_convex_hull:
         bin_seg=rules.binarize.output.mask
         if config["skip_brainstem"]
         else rules.add_brainstem.output.mask,
+    params:
+        margin_mm=config.get("hull_margin_mm", 5),
     output:
         convex_hull=bids_labelmerge(
             space="T1w",
             desc="ConvexHull",
+            suffix="mask.nii.gz",
+        ),
+        convex_hull_margin=bids_labelmerge(
+            space="T1w",
+            desc="ConvexHullMargin",
             suffix="mask.nii.gz",
         ),
     threads: 4

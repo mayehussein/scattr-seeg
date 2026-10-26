@@ -101,9 +101,21 @@ rule registration_qc:
         "../scripts/qc/registration_qc.py"
 
 
+# Template registration is only used to bring the ZonaBB atlas to native
+# space, so its QC (and the registration itself) is skipped when the atlas
+# is not used
+use_template_reg = not config.get("skip_labelmerge") and not config.get(
+    "labelmerge_base_dir"
+)
+
+
 rule gather_qc:
     input:
         dseg_png=inputs["T1w"].expand(rules.segment_qc.output.qc_png),
         dseg_html=inputs["T1w"].expand(rules.segment_qc.output.qc_html),
-        reg_svg=inputs["T1w"].expand(rules.registration_qc.output.qc_svg),
-        reg_html=inputs["T1w"].expand(rules.registration_qc.output.qc_html),
+        reg_svg=inputs["T1w"].expand(rules.registration_qc.output.qc_svg)
+        if use_template_reg
+        else [],
+        reg_html=inputs["T1w"].expand(rules.registration_qc.output.qc_html)
+        if use_template_reg
+        else [],

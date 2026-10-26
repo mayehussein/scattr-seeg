@@ -1,24 +1,38 @@
 rule tckgen_wholebrain:
     """
-    Whole-brain seeded tractography (no convex-hull exclusion).
-    Seeds are placed randomly across the brain mask and streamlines
-    must traverse the subcortical/contact segmentation (-include) to
-    be retained. The convex hull is NOT applied here so that long-range
-    connections passing through the ROIs are captured.
+    Whole-brain tractography (no convex-hull constraint, no -include), so
+    the tractogram covers the whole brain for SIFT2 and captures long-range
+    connections. Seeds are placed randomly across the brain mask, or with
+    --act placed dynamically (-seed_dynamic) and tracked with ACT.
 
-    Tournier, J.-D.; Calamante, F. & Connelly, A. Improved probabilistic 
-    streamlines tractography by 2nd order integration over fibre orientation 
-    distributions. Proceedings of the International Society for Magnetic 
+    Tournier, J.-D.; Calamante, F. & Connelly, A. Improved probabilistic
+    streamlines tractography by 2nd order integration over fibre orientation
+    distributions. Proceedings of the International Society for Magnetic
     Resonance in Medicine, 2010, 1670
+
+    Smith, R. E.; Tournier, J.-D.; Calamante, F. & Connelly, A. SIFT2:
+    Enabling dense quantitative assessment of brain white matter connectivity
+    using streamlines tractography. NeuroImage, 2015, 119, 338-351
     """
     input:
         fod=rules.mtnormalise.output.wm_fod,
         mask=rules.nii2mif.output.mask,
         convex_hull=rules.create_convex_hull.output.convex_hull,
         subcortical_seg=rules.get_num_nodes.input.seg,
+        tt5=rules.gen_5tt.output.tt5 if config.get("act") else [],
     params:
         step=config["step"],
         sl=config["sl_count"],
+        act_opts=lambda wildcards, input: (
+            f"-act {input.tt5} -backtrack -crop_at_gmwmi -maxlength 250"
+            if config.get("act")
+            else ""
+        ),
+        seed_opts=lambda wildcards, input: (
+            f"-seed_dynamic {input.fod}"
+            if config.get("act")
+            else f"-seed_image {input.mask}"
+        ),
     output:
         tck=bids_tractography_out(
             desc="iFOD2wholebrain",
@@ -51,9 +65,43 @@ rule tckgen_wholebrain:
         mkdir -p {resources.tmp_dir}
 
         tckgen -nthreads {threads} -algorithm iFOD2 -step {params.step} \\
-            -select {params.sl} \\
+            -select {params.sl} {params.act_opts} \\
             -mask {input.mask} \\
-            -seed_image {input.mask} {input.fod} {resources.tmp_tck} &> {log}
+            {params.seed_opts} {input.fod} {resources.tmp_tck} &> {log}
+
+        rsync -v {resources.tmp_tck} {output.tck} >> {log} 2>&1
+        """
+
+
+# Local tckgen command: seeded within the convex hull interior (default), or
+# without the convex hull (--skip_convex_hull)
+tckgen_local_hull_shell = """
+        mkdir -p {resources.tmp_dir}
+
+        # Hull interior for seeding: 0=inside -> 1, 1=outside -> 0
+        mrcalc {input.convex_hull} 0 -eq {resources.interior_mask} \\
+            -force &> {log}
+
+        tckgen -nthreads {threads} -algorithm iFOD2 -step {params.step} \\
+            -select {params.sl} {params.act_opts} \\
+            -include {input.subcortical_seg} \\
+            -mask {input.mask} \\
+            -exclude {input.convex_hull_margin} \\
+            -seed_image {resources.interior_mask} \\
+            {input.fod} {resources.tmp_tck} >> {log} 2>&1
+
+        rsync -v {resources.tmp_tck} {output.tck} >> {log} 2>&1
+        """
+
+tckgen_local_nohull_shell = """
+        mkdir -p {resources.tmp_dir}
+
+        tckgen -nthreads {threads} -algorithm iFOD2 -step {params.step} \\
+            -select {params.sl} {params.act_opts} \\
+            -include {input.subcortical_seg} \\
+            -mask {input.mask} \\
+            -seed_image {input.mask} \\
+            {input.fod} {resources.tmp_tck} &> {log}
 
         rsync -v {resources.tmp_tck} {output.tck} >> {log} 2>&1
         """
@@ -62,30 +110,52 @@ rule tckgen_wholebrain:
 rule tckgen_local:
     """
     Local tractography seeded within the convex hull interior.
-    The convex hull image stores 0=inside and 1=outside, so it is
-    inverted with mrcalc to produce a mask where 1=interior.
-    Streamlines are seeded and confined within this interior mask,
-    densely sampling connections among the target ROIs.
+    The convex hull image stores 0=inside and 1=outside, so the interior
+    (1=inside) used for seeding is obtained with mrcalc.
+    Streamlines may travel anywhere within the brain mask, but are rejected
+    (-exclude) if they go more than hull_margin_mm outside the hull, rather
+    than being truncated at the hull boundary. The margin keeps streamlines
+    that run a few mm past the outermost nodes; a margin of 0 matches the
+    exact-hull exclusion of the original SCATTR. With --act, streamlines are
+    also tracked with ACT.
 
-    Tournier, J.-D.; Calamante, F. & Connelly, A. Improved probabilistic 
-    streamlines tractography by 2nd order integration over fibre orientation 
-    distributions. Proceedings of the International Society for Magnetic 
+    With --skip_convex_hull, the convex hull is not used: seeds are placed
+    uniformly within the brain mask and only streamlines that traverse a
+    node (-include) are kept, i.e. a whole-brain tractogram restricted to
+    streamlines touching the nodes. More streamlines are rejected, so this
+    run uses all available cores (it then runs after, not alongside, the
+    whole-brain run).
+
+    Tournier, J.-D.; Calamante, F. & Connelly, A. Improved probabilistic
+    streamlines tractography by 2nd order integration over fibre orientation
+    distributions. Proceedings of the International Society for Magnetic
     Resonance in Medicine, 2010, 1670
     """
     input:
         fod=rules.mtnormalise.output.wm_fod,
         mask=rules.nii2mif.output.mask,
-        convex_hull=rules.create_convex_hull.output.convex_hull,
+        convex_hull=rules.create_convex_hull.output.convex_hull
+        if not config.get("skip_convex_hull")
+        else [],
+        convex_hull_margin=rules.create_convex_hull.output.convex_hull_margin
+        if not config.get("skip_convex_hull")
+        else [],
         subcortical_seg=rules.get_num_nodes.input.seg,
+        tt5=rules.gen_5tt.output.tt5 if config.get("act") else [],
     params:
         step=config["step"],
         sl=config["sl_count_local"],
+        act_opts=lambda wildcards, input: (
+            f"-act {input.tt5} -backtrack -crop_at_gmwmi -maxlength 250"
+            if config.get("act")
+            else ""
+        ),
     output:
         tck=bids_tractography_out(
             desc="iFOD2local",
             suffix="tractography.tck",
         ),
-    threads: 16
+    threads: workflow.cores if config.get("skip_convex_hull") else 16
     resources:
         tmp_dir=lambda wildcards: bids_tractography_out(
             root=os.environ.get("SLURM_TMPDIR")
@@ -116,21 +186,9 @@ rule tckgen_local:
     container:
         config["singularity"]["scattr"]
     shell:
-        """
-        mkdir -p {resources.tmp_dir}
-
-        # Invert hull: 0=inside->1, 1=outside->0, so interior becomes valid
-        mrcalc {input.convex_hull} 1 -sub {resources.interior_mask} &> {log}
-
-        tckgen -nthreads {threads} -algorithm iFOD2 -step {params.step} \\
-            -select {params.sl} \\
-            -include {input.subcortical_seg} \\
-            -mask {resources.interior_mask} \\
-            -seed_image {resources.interior_mask} \\
-            {input.fod} {resources.tmp_tck} >> {log} 2>&1
-
-        rsync -v {resources.tmp_tck} {output.tck} >> {log} 2>&1
-        """
+        tckgen_local_nohull_shell
+        if config.get("skip_convex_hull")
+        else tckgen_local_hull_shell
 
 
 rule tckedit_combine:
@@ -188,6 +246,11 @@ rule tcksift2:
     input:
         tck=rules.tckedit_combine.output.tck,
         fod=rules.mtnormalise.output.wm_fod,
+        tt5=rules.gen_5tt.output.tt5 if config.get("act") else [],
+    params:
+        act_opts=lambda wildcards, input: (
+            f"-act {input.tt5}" if config.get("act") else ""
+        ),
     output:
         weights=bids_tractography_out(
             desc="iFOD2",
@@ -204,7 +267,7 @@ rule tcksift2:
         config["singularity"]["scattr"]
     shell:
         """
-        tcksift2 -nthreads {threads} -out_mu {output.mu} \\
+        tcksift2 -nthreads {threads} -out_mu {output.mu} {params.act_opts} \\
             {input.tck} {input.fod} {output.weights} &> {log}
         """
 
@@ -278,6 +341,7 @@ checkpoint create_exclude_mask:
             datatype="roi_masks",
         ),
         subj_wildcards=inputs.subj_wildcards,
+        skip_labelmerge=config.get("skip_labelmerge", False),
     output:
         out_dir=directory(bids_anat_out(datatype="exclude_mask")),
     threads: 4
